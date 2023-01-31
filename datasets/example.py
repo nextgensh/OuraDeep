@@ -52,7 +52,8 @@ class SimpleLSTM(nn.Module):
         self.linear4 = nn.Linear(16, 1)
 
     # Define the forward pass for the network.
-    def forward(self, input_sequence):
+    # Pass
+    def forward(self, input_sequence, h0=None, c0=None):
         # Set the sequence length to the embedding length.
         # Truncate it if too long or pad it with 0 if small.
         input_length = input_sequence.size()[0]
@@ -64,8 +65,10 @@ class SimpleLSTM(nn.Module):
 
         # Pass the sequence to the LSTM layer.
         # By default the h0 and c0 states are set to 0. We don't care for this example.
-        h0 = torch.zeros((1, self.hidden_length), requires_grad=True)
-        c0 = torch.zeros((1, self.hidden_length), requires_grad=True)
+        if h0 is None:
+            h0 = torch.zeros((1, self.hidden_length), requires_grad=True)
+        if c0 is None:
+            c0 = torch.zeros((1, self.hidden_length), requires_grad=True)
         input_sequence = input_sequence.reshape(1, -1)
         input_sequence = input_sequence.to(torch.float32)
         output, (final_h_state, final_c_state) = self.lstm(input_sequence, (h0, c0))
@@ -74,7 +77,7 @@ class SimpleLSTM(nn.Module):
         output = self.linear3(output)
         output = self.linear4(output)
 
-        return output
+        return output, None, None
 
 # Method to clip gradient.
 def clip_gradient(model, clip_value):
@@ -105,6 +108,10 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
         current_Y = Y[current_mini_idx]
         prev_Y = current_Y
 
+        # Init the hidden state and cell state of the LSTM.
+        h0 = None
+        c0 = None
+
         while current_mini_idx < Y.size()[0]:
             old_mini_idx = current_mini_idx
             #print(current_mini_idx)
@@ -120,10 +127,11 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
             # TODO : Each mini segment can also be length adjusted and stacked to make a single batch for training.
             # Zero out the gradients before from the last pass.
             optim.zero_grad()
-            prediction = model(X_mini_segment)
+            # We can pass hidden state and cell state from previous sequence into the LSTM.
+            (prediction, h0, c0) = model(X_mini_segment, h0, c0)
             loss = loss_fn(prediction, target)
             print('Data Point - {idx}, Sequence State - {mini_idx}, Loss - {loss}'.
-                  format(idx=idx, mini_idx = current_mini_idx, loss=loss.item()), end='\r', flush=True)
+                  format(idx=idx, mini_idx = current_mini_idx, loss=loss.item()))
             # Chain rule the gradients.
             loss.backward()
             # Clip the gradient so it does not explode.

@@ -69,7 +69,7 @@ class TemperatureDataset(Dataset):
                 WHERE pid = {pid}
             ),
             gestation AS (
-                SELECT redcap.pid, redcap.gestational_age_days as gdays
+                SELECT redcap.pid, (redcap.gestational_age_weeks*7+redcap.gestational_age_days) as gdays
                 FROM redcap
                 WHERE pid = {pid}
                     AND redcap.gestational_age_days IS NOT NULL
@@ -117,6 +117,7 @@ class TemperatureDataset(Dataset):
     def __getitem__(self, idx):
         # Get the pid corresponding to the index inside the pid list.
         pid = self.pids[idx]
+        print(pid)
         # Run a query that will pull from cache results.
         result = self.db.execQuery(self.query.format(pid=pid), cached=self.offlineCache)
         X = result['skintemp'].values
