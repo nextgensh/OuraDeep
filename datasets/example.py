@@ -19,18 +19,19 @@ utils = TemperatureUtils(database='elise')
 pids = utils.getPids()
 (train_pids, val_pids) = utils.split(pids, train=0.8, val=0.2)
 
-print('The size of the training and validation split is -')
-print(train_pids.size, val_pids.size)
+print('The size of the training and validation split is - {train}, {val}'.format(
+    train=train_pids.size, val=val_pids.size
+))
 
 # Create the datasets from the randomly shuffled
 # NOTE - The first time this code is run, it will cache all query data locally.
 #        This can take time. Almost 20 mins. Go grab a coffee or something in the meantime!
 #        All subsequent calls will get data from the cache (.cache folder) and will be a lot faster.
-training_data = TemperatureTrain(database='elise', pids=train_pids)
-val_data = TemperatureTrain(database='elise', pids=val_pids)
+training_data = TemperatureTrain(database='elise', pids=train_pids, skipNan=True)
+val_data = TemperatureTrain(database='elise', pids=val_pids, skipNan=True)
 
 # Print out the size of the training and validation datasets.
-print(len(training_data), len(val_data))
+#print(len(training_data), len(val_data))
 
 class SimpleLSTM(nn.Module):
     """
@@ -77,7 +78,7 @@ class SimpleLSTM(nn.Module):
         output = self.linear3(output)
         output = self.linear4(output)
 
-        return output, None, None
+        return output, h0.detach().clone(), c0.detach().clone()
 
 # Method to clip gradient.
 def clip_gradient(model, clip_value):
@@ -94,27 +95,35 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
     # Put the model weights into training mode.
     model.train()
 
+    training_loss = torch.zeros(train_iter.length)
+
     # When we enumerate over each data point in train_iter it will give us 1 data point
     # per participant. This then needs to be broken down into individual segments / days
     # so that each of them can have a distinctive Y value.
-
     for idx, data in enumerate(train_iter):
         # Extract the X (skin temp) and Y (gestational age + labor onset = predictor) from the data.
         X = data[0]
         Y = data[1]
+        pid = data[2]
 
         current_mini_idx = 0
         old_mini_idx = 0
         current_Y = Y[current_mini_idx]
         prev_Y = current_Y
 
-        # Init the hidden state and cell state of the LSTM.
+        """
+        We apply transfer learning within each participant, by not resetting the weights
+        of the internal layers. If you want to reset the weights of the internal layer
+        the reinit h0, c0 = None inside the mini_segment loop below.
+        """
         h0 = None
         c0 = None
 
+        print('\n')
+        print('ParticipantID - {pid}'.format(pid=pid))
+
         while current_mini_idx < Y.size()[0]:
             old_mini_idx = current_mini_idx
-            #print(current_mini_idx)
             prev_Y = current_Y
             while current_Y == prev_Y and current_mini_idx < Y.size()[0]:
                 current_Y = Y[current_mini_idx]
@@ -130,17 +139,76 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
             # We can pass hidden state and cell state from previous sequence into the LSTM.
             (prediction, h0, c0) = model(X_mini_segment, h0, c0)
             loss = loss_fn(prediction, target)
-            print('Data Point - {idx}, Sequence State - {mini_idx}, Loss - {loss}'.
-                  format(idx=idx, mini_idx = current_mini_idx, loss=loss.item()))
+            print('G+L Day - {target}, Sequence State - {mini_idx}, Training Loss - {loss}'.
+                  format(target=target.item(), mini_idx = current_mini_idx, loss=loss.item()), end='\r', flush=True)
             # Chain rule the gradients.
             loss.backward()
             # Clip the gradient so it does not explode.
             clip_gradient(model, 1e-1)
             optim.step()
 
-    return loss.item()
+        training_loss[idx] = loss.item()
+
+    return torch.mean(training_loss), torch.std(training_loss)
+
+# Helper method used to evaluate the model
+def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
+    total_loss = 0
+    # Put the model into evaluation mode. So the weights are locked.
+    model.eval()
+
+    eval_loss = torch.zeros(val_iter.length)
+
+    # The math operations will not update the gradients.
+    with torch.no_grad():
+        # The eval loop is similar to the training loop for the mini segments.
+        for idx, data in enumerate(val_iter):
+            # Extract the X (skin temp) and Y (gestational age + labor onset = predictor) from the data.
+            X = data[0]
+            Y = data[1]
+            pid = data[2]
+
+            current_mini_idx = 0
+            old_mini_idx = 0
+            current_Y = Y[current_mini_idx]
+            prev_Y = current_Y
+
+            """
+            We apply transfer learning within each participant, by not resetting the weights
+            of the internal layers. If you want to reset the weights of the internal layer
+            the reinit h0, c0 = None inside the mini_segment loop below.
+            """
+            h0 = None
+            c0 = None
+
+            print('\n')
+            print('ParticipantID - {pid}'.format(pid=pid))
+
+            while current_mini_idx < Y.size()[0]:
+                old_mini_idx = current_mini_idx
+                prev_Y = current_Y
+                while current_Y == prev_Y and current_mini_idx < Y.size()[0]:
+                    current_Y = Y[current_mini_idx]
+                    current_mini_idx += 1
+
+                X_mini_segment = X[old_mini_idx : current_mini_idx]
+                target = torch.tensor([Y[current_mini_idx-1]])
+
+                # We can pass hidden state and cell state from previous sequence into the LSTM.
+                (prediction, h0, c0) = model(X_mini_segment, h0, c0)
+                loss = loss_fn(prediction, target)
+                print('G+L Day - {target}, Sequence State - {mini_idx}, Validation Loss - {loss}'.
+                    format(target=target.item(), mini_idx = current_mini_idx, loss=loss.item()), end='\r', flush=True)
+
+            eval_loss[idx] = loss.item()
+
+    return torch.mean(eval_loss), torch.std(eval_loss)
 
 # Start calling the training helper function
 model = SimpleLSTM(embed_length=512, hidden_length=256)
 # Using a simple L1 loss.
-train_loss = train_model(model, train_iter=training_data)
+train_loss_avg, train_loss_std = train_model(model, train_iter=training_data)
+eval_loss_avg, eval_loss_std = eval_model(model, val_iter=val_data)
+
+print('Training Loss : Average - {avg}, Std - {std}'.format(avg=train_loss_avg, std=train_loss_std))
+print('Validation Loss : Average - {avg}, Std - {std}'.format(avg=eval_loss_avg, std=eval_loss_std))

@@ -41,6 +41,8 @@ class TemperatureDataset(Dataset):
                  'day' (not implemented) to group the datapoints by each day per participant.
     4. reverseOrder : If True then input and output vectors are ordered in a descending order of time.
                       False (default) then they are organized in ascending order of time.
+    4. skipNan : If True it drops data points (entire pid records) which have nan values in
+                 any of the series. False it keeps them (False).
     5. pids : An array of pid values to use for pull temperature data.
 
     Returns
@@ -53,6 +55,7 @@ class TemperatureDataset(Dataset):
                  offlineCache=True,
                  groupBy='pid',
                  reverseOrder=False,
+                 skipNan=False,
                  pids=[]):
 
         self.offlineCache = offlineCache
@@ -108,16 +111,36 @@ class TemperatureDataset(Dataset):
             WHERE laboroffset <= 0
             ORDER BY utime ASC
         """
+        # Since some pid don't have data we store the ones with data in this new array.
+        updated_pid = []
         for pid in self.pids:
-            _ = self.db.execQuery(self.query.format(pid=pid), cached=self.offlineCache)
+            results = self.db.execQuery(self.query.format(pid=pid), cached=self.offlineCache)
+            #print('Preparing pid - {pid}'.format(pid=pid))
+            # We have some pids with nan values, that are currently skipped if skipNan=True.
+            # pid = [15, 16] are treated in that maner.
+            dropFlag = False
+            if results.shape[0] > 0:
+                if results.isna().any().any():
+                    if skipNan:
+                        print('Dropped pid = {pid} because it contained Nan'.format(pid=pid))
+                        dropFlag = True
+                    else:
+                        print('Warning : pid = {} has nan values. You have left skipNan=False. This will return nan values which may lead to further errors unless handled.')
+            else:
+                print('No data found for pid = {pid}. Dropped them'.format(pid=pid))
+                dropFlag = True
+
+            if not dropFlag:
+                updated_pid += [pid]
+
+        self.pids = updated_pid
 
     def __len__(self):
-        return self.length
+        return self.pids.length
 
     def __getitem__(self, idx):
         # Get the pid corresponding to the index inside the pid list.
         pid = self.pids[idx]
-        print(pid)
         # Run a query that will pull from cache results.
         result = self.db.execQuery(self.query.format(pid=pid), cached=self.offlineCache)
         X = result['skintemp'].values
@@ -127,7 +150,7 @@ class TemperatureDataset(Dataset):
         X = torch.tensor(X)
         Y = torch.tensor(Y)
 
-        return X, Y
+        return X, Y, pid
 
 class TemperatureTrain(TemperatureDataset):
     """
