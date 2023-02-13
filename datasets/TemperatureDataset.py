@@ -107,7 +107,7 @@ class TemperatureDataset(Dataset):
                 FROM jointable
                 FULL JOIN gestation ON gestation.pid = jointable.pid
             )
-            SELECT pid, utime, skintemp, adjustedoffset FROM laborskin
+            SELECT pid, utime, skintemp, adjustedoffset, laboroffset FROM laborskin
             WHERE laboroffset <= 0
             ORDER BY utime ASC
         """
@@ -145,12 +145,13 @@ class TemperatureDataset(Dataset):
         result = self.db.execQuery(self.query.format(pid=pid), cached=self.offlineCache)
         X = result['skintemp'].values
         Y = result['adjustedoffset'].values
+        laboroffset = result['laboroffset'].values
 
         # Convert them into tensors before sending them back.
         X = torch.tensor(X)
         Y = torch.tensor(Y)
 
-        return X, Y, pid
+        return X, Y, laboroffset, pid
 
 class TemperatureTrain(TemperatureDataset):
     """

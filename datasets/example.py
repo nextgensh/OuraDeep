@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 
 import numpy as np
+import pandas as pd
+import plotly.express as px
 
 # Set the random seed so utils.split() does not return different splits for each training experiment
 # (Remove if you want them to return different splits)
@@ -87,7 +89,7 @@ def clip_gradient(model, clip_value):
         p.grad.data.clamp_(-clip_value, clip_value)
 
 # Helper method to help train the model.
-def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
+def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss, logfolder=None):
     # If you want to move the model to cuda from cpu uncomment the below line
     # model.cuda()
 
@@ -104,7 +106,8 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
         # Extract the X (skin temp) and Y (gestational age + labor onset = predictor) from the data.
         X = data[0]
         Y = data[1]
-        pid = data[2]
+        laboroffset = data[2]
+        pid = data[3]
 
         current_mini_idx = 0
         old_mini_idx = 0
@@ -122,6 +125,10 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
         print('\n')
         print('ParticipantID - {pid}'.format(pid=pid))
 
+        # Store the loss vs target for each pid.
+        loss_buff = []
+        target_buff = []
+
         while current_mini_idx < Y.size()[0]:
             old_mini_idx = current_mini_idx
             prev_Y = current_Y
@@ -131,6 +138,7 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
 
             X_mini_segment = X[old_mini_idx : current_mini_idx]
             target = torch.tensor([Y[current_mini_idx-1]])
+            loffset = laboroffset[current_mini_idx-1]
 
             # This can now be passed as a single sequence to model.
             # TODO : Each mini segment can also be length adjusted and stacked to make a single batch for training.
@@ -141,18 +149,34 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss):
             loss = loss_fn(prediction, target)
             print('G+L Day - {target}, Sequence State - {mini_idx}, Training Loss - {loss}'.
                   format(target=target.item(), mini_idx = current_mini_idx, loss=loss.item()), end='\r', flush=True)
+            loss_buff += [loss.detach().numpy()]
+            target_buff += [np.abs(loffset)]
             # Chain rule the gradients.
             loss.backward()
             # Clip the gradient so it does not explode.
             clip_gradient(model, 1e-1)
             optim.step()
 
+        if logfolder is not None:
+            frame = pd.DataFrame({
+                'Days before labor' : target_buff,
+                'Training Loss (L1 Loss)' : loss_buff
+            })
+            frame.to_csv('{logfolder}/loss/train_{pid}.csv'.format(
+                logfolder=logfolder,
+                pid=pid
+            ), index=False)
+            fig = px.scatter(frame, x='Days before labor', y='Training Loss (L1 Loss)')
+            # Make sure the X Axis is revered, so it can show how the loss is changing.
+            fig['layout']['xaxis']['autorange'] = 'reversed'
+            fig.write_image('{logfolder}/graphs/train_{pid}.png'.format(logfolder=logfolder, pid=pid))
+
         training_loss[idx] = loss.item()
 
     return torch.mean(training_loss), torch.std(training_loss)
 
 # Helper method used to evaluate the model
-def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
+def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss, logfolder=None):
     total_loss = 0
     # Put the model into evaluation mode. So the weights are locked.
     model.eval()
@@ -166,7 +190,8 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
             # Extract the X (skin temp) and Y (gestational age + labor onset = predictor) from the data.
             X = data[0]
             Y = data[1]
-            pid = data[2]
+            laboroffset = data[2]
+            pid = data[3]
 
             current_mini_idx = 0
             old_mini_idx = 0
@@ -184,6 +209,9 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
             print('\n')
             print('ParticipantID - {pid}'.format(pid=pid))
 
+            loss_buff = []
+            target_buff = []
+
             while current_mini_idx < Y.size()[0]:
                 old_mini_idx = current_mini_idx
                 prev_Y = current_Y
@@ -193,12 +221,29 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
 
                 X_mini_segment = X[old_mini_idx : current_mini_idx]
                 target = torch.tensor([Y[current_mini_idx-1]])
+                loffset = laboroffset[current_mini_idx-1]
 
                 # We can pass hidden state and cell state from previous sequence into the LSTM.
                 (prediction, h0, c0) = model(X_mini_segment, h0, c0)
                 loss = loss_fn(prediction, target)
                 print('G+L Day - {target}, Sequence State - {mini_idx}, Validation Loss - {loss}'.
                     format(target=target.item(), mini_idx = current_mini_idx, loss=loss.item()), end='\r', flush=True)
+                loss_buff += [loss.detach().numpy()]
+                target_buff += [np.abs(loffset)]
+
+            if logfolder is not None:
+                frame = pd.DataFrame({
+                    'Days before labor' : target_buff,
+                    'Prediction Loss (L1 Loss)' : loss_buff
+                })
+                frame.to_csv('{logfolder}/loss/predict_{pid}.csv'.format(
+                    logfolder=logfolder,
+                    pid=pid
+                ), index=False)
+                fig = px.scatter(frame, x='Days before labor', y='Prediction Loss (L1 Loss)')
+                # Make sure the X Axis is revered, so it can show how the loss is changing.
+                fig['layout']['xaxis']['autorange'] = 'reversed'
+                fig.write_image('{logfolder}/graphs/predict_{pid}.png'.format(logfolder=logfolder, pid=pid))
 
             eval_loss[idx] = loss.item()
 
@@ -207,8 +252,8 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss):
 # Start calling the training helper function
 model = SimpleLSTM(embed_length=512, hidden_length=256)
 # Using a simple L1 loss.
-train_loss_avg, train_loss_std = train_model(model, train_iter=training_data)
-eval_loss_avg, eval_loss_std = eval_model(model, val_iter=val_data)
+train_loss_avg, train_loss_std = train_model(model, train_iter=training_data, logfolder='../logs_training')
+eval_loss_avg, eval_loss_std = eval_model(model, val_iter=val_data, logfolder='../logs_predict')
 
 print('Training Loss : Average - {avg}, Std - {std}'.format(avg=train_loss_avg, std=train_loss_std))
 print('Validation Loss : Average - {avg}, Std - {std}'.format(avg=eval_loss_avg, std=eval_loss_std))
