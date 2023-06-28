@@ -190,6 +190,31 @@ class TemperatureUtils():
 
         return np.array(pids)
 
+    def getSpontaneousPids(self):
+        """
+        Method returns pids for only those participants that underwent spontaneous birth.
+        """
+        query = """
+        WITH labor_spon AS (
+            SELECT pid
+            from redcap
+            WHERE laborprogress = 1.0
+                OR laborprogress = 2.0
+        ),
+        temperature_pid AS (
+            SELECT DISTINCT(pid) as pid
+            FROM temperature
+        )
+        SELECT DISTINCT(labor_spon.pid)
+        FROM labor_spon
+            INNER JOIN temperature ON temperature.pid = labor_spon.pid
+        """
+
+        results = self.db.execQuery(query, cached=self.offlineCache)
+        pids = results['pid'].values
+
+        return np.array(pids)
+
     def split(self, pids, train=0.8, val=0.2):
         np.random.shuffle(pids)
         length = pids.size

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-from TemperatureDataset import TemperatureTrain
-from TemperatureDataset import TemperatureVal
-from TemperatureDataset import TemperatureUtils
+from NightTemperatureDataset import TemperatureTrain
+from NightTemperatureDataset import TemperatureVal
+from NightTemperatureDataset import TemperatureUtils
 from torch.utils.data import DataLoader
 from torch import nn
 import torch
@@ -18,7 +18,7 @@ import plotly.express as px
 np.random.seed(1000)
 
 utils = TemperatureUtils(database='elise')
-pids = utils.getPids()
+pids = utils.getSpontaneousPids()
 (train_pids, val_pids) = utils.split(pids, train=0.8, val=0.2)
 
 print('The size of the training and validation split is - {train}, {val}'.format(
@@ -109,6 +109,9 @@ def train_model(model, train_iter, epoch=None, loss_fn=F.l1_loss, logfolder=None
         laboroffset = data[2]
         pid = data[3]
 
+        # Normalize the whole temperature dataset.
+        X = X / torch.max(X)
+
         current_mini_idx = 0
         old_mini_idx = 0
         current_Y = Y[current_mini_idx]
@@ -193,6 +196,8 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss, logfolder=None):
             laboroffset = data[2]
             pid = data[3]
 
+            X = X / torch.max(X)
+
             current_mini_idx = 0
             old_mini_idx = 0
             current_Y = Y[current_mini_idx]
@@ -250,10 +255,10 @@ def eval_model(model, val_iter, epoch=None, loss_fn=F.l1_loss, logfolder=None):
     return torch.mean(eval_loss), torch.std(eval_loss)
 
 # Start calling the training helper function
-model = SimpleLSTM(embed_length=512, hidden_length=256)
+model = SimpleLSTM(embed_length=1600, hidden_length=512)
 # Using a simple L1 loss.
-train_loss_avg, train_loss_std = train_model(model, train_iter=training_data, logfolder='../logs_training')
-eval_loss_avg, eval_loss_std = eval_model(model, val_iter=val_data, logfolder='../logs_predict')
+train_loss_avg, train_loss_std = train_model(model, train_iter=training_data, logfolder='../logs_spon_training')
+eval_loss_avg, eval_loss_std = eval_model(model, val_iter=val_data, logfolder='../logs_spon_predict')
 
 print('Training Loss : Average - {avg}, Std - {std}'.format(avg=train_loss_avg, std=train_loss_std))
 print('Validation Loss : Average - {avg}, Std - {std}'.format(avg=eval_loss_avg, std=eval_loss_std))
